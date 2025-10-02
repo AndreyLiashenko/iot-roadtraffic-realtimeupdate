@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+kafka-python
+psycopg2-binary
+protobuf
+networkx
+osmnx
+pandas
+matplotlib
+seaborn
+apscheduler
+requests
+Flask
+gunicorn
+Flask-CORS

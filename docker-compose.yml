@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.2
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.2
+    container_name: kafka
+    depends_on: [zookeeper]
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: traffic_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports: ["5432:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+
+  app: # API Gateway (Producer)
+    container_name: traffic_app_producer
+    build: .
+    depends_on: [kafka, postgres]
+    volumes: [./:/app]
+    ports: ["8001:8000"]
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # --- Consumer Services ---
+  consumer-sut:
+    build: .
+    container_name: consumer_sut
+    depends_on: [kafka]
+    volumes: [./:/app]
+    ports: ["5001:5001"]
+    command: ["python", "consumer_sut.py"]
+
+  consumer-recalc:
+    build: .
+    container_name: consumer_recalc
+    depends_on: [kafka, postgres]
+    volumes: [./:/app]
+    ports: ["5002:5002"]
+    command: ["python", "consumer_recalc.py"]
+
+  consumer-sliding-window:
+    build: .
+    container_name: consumer_sliding_window
+    depends_on: [kafka]
+    volumes: [./:/app]
+    ports: ["5003:5003"]
+    command: ["python", "consumer_sliding_window.py"]
+
+  # --- UI Service ---
+  ui:
+    image: nginx:1.21-alpine
+    container_name: traffic_ui
+    ports: ["8080:80"]
+    volumes: [./ui:/usr/share/nginx/html]
+    depends_on: [consumer-sut, consumer-recalc, consumer-sliding-window]
+
+volumes:
+  postgres_data:

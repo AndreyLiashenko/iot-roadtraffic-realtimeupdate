@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Traffic Simulation Dashboard</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
+        #map { height: 100vh; }
+        .controls { position: absolute; top: 10px; right: 10px; background: white; padding: 10px; border-radius: 5px; z-index: 1000; }
+        button { margin: 5px; padding: 10px; cursor: pointer; border: 1px solid #ccc; }
+        button.active { background-color: #4CAF50; color: white; }
+        #status { margin-top: 10px; font-style: italic; color: #555; }
+    </style>
+</head>
+<body>
+
+<div class="controls">
+    <h3>Select Consumer</h3>
+    <button id="btn-5001" onclick="switchDataSource(5001, this)">SUT (Exponential Smoothing)</button>
+    <button id="btn-5002" onclick="switchDataSource(5002, this)">Baseline (DB Recalc)</button>
+    <button id="btn-5003" onclick="switchDataSource(5003, this)">Baseline (Sliding Window)</button>
+    <div id="status">Status: Idle</div>
+</div>
+
+<div id="map"></div>
+
+<script>
+    const map = L.map('map').setView([50.55, 30.22], 13); // Center on Irpin
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap &copy; CARTO'
+    }).addTo(map);
+
+    L.svg().addTo(map);
+    const svg = d3.select(map.getPanes().overlayPane).select("svg").attr("pointer-events", "auto");
+    const g = svg.append("g").attr("class", "leaflet-zoom-hide");
+
+    let currentPort = 0;
+    let nodes = {}, edges = [];
+    let updateInterval;
+
+    const colorScale = d3.scaleLinear().domain([5, 25, 50]).range(["red", "yellow", "green"]);
+
+    function projectPoint(lat, lon) {
+        const point = map.latLngToLayerPoint(new L.LatLng(lat, lon));
+        return [point.x, point.y];
+    }
+
+    async function fetchGraphData(port) {
+        try {
+            const response = await fetch(`http://localhost:${port}/graph`);
+            if (!response.ok) throw new Error('Network response was not ok');
+            const data = await response.json();
+            
+            data.nodes.forEach(n => nodes[n.id] = {lat: n.lat, lon: n.lon});
+            edges = data.edges;
+
+            document.getElementById('status').innerText = `Status: Updated at ${new Date().toLocaleTimeString()}`;
+            return true;
+        } catch (error) {
+            document.getElementById('status').innerText = `Status: Error fetching from port ${port}`;
+            return false;
+        }
+    }
+
+    function drawGraph() {
+        if (edges.length === 0) return;
+
+        const lineGenerator = d3.line().x(d => d[0]).y(d => d[1]);
+
+        const path = g.selectAll("path").data(edges, d => `${d.source}-${d.target}`);
+
+        path.enter().append("path")
+            .merge(path)
+            .attr("stroke-width", 2)
+            .attr("fill", "none")
+            .attr("d", d => {
+                const sourceNode = nodes[d.source];
+                const targetNode = nodes[d.target];
+                if (!sourceNode || !targetNode) return null;
+                return lineGenerator([projectPoint(sourceNode.lat, sourceNode.lon), projectPoint(targetNode.lat, targetNode.lon)]);
+            })
+            .attr("stroke", d => colorScale(d.speed));
+        
+        path.exit().remove();
+    }
+
+    function switchDataSource(port, btnElement) {
+        if (currentPort === port) return;
+        currentPort = port;
+        
+        document.querySelectorAll('.controls button').forEach(btn => btn.classList.remove('active'));
+        btnElement.classList.add('active');
+
+        nodes = {}; 
+        edges = [];
+        g.selectAll("path").remove();
+        
+        if (updateInterval) clearInterval(updateInterval);
+        
+        const update = () => fetchGraphData(port).then(success => success && drawGraph());
+        update();
+        updateInterval = setInterval(update, 3000);
+    }
+
+    map.on("zoom move", drawGraph);
+    document.getElementById('btn-5001').click(); // Start with the first consumer
+</script>
+
+</body>
+</html>
