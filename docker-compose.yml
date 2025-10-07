@@ -4,9 +4,7 @@ services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.2
     container_name: zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
+    environment: { ZOOKEEPER_CLIENT_PORT: 2181, ZOOKEEPER_TICK_TIME: 2000 }
 
   kafka:
     image: confluentinc/cp-kafka:7.3.2
@@ -22,31 +20,73 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "36464:8080"
+    depends_on:
+      - kafka
+      - zookeeper
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local-kafka-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
   postgres:
     image: postgres:15-alpine
     container_name: postgres
-    environment:
-      POSTGRES_DB: traffic_db
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
+    environment: { POSTGRES_DB: traffic_db, POSTGRES_USER: user, POSTGRES_PASSWORD: password }
     ports: ["5432:5432"]
     volumes: [postgres_data:/var/lib/postgresql/data]
 
-  app: # API Gateway (Producer)
-    container_name: traffic_app_producer
+# --- Multiple API Gateway replicas ---
+  app1:
     build: .
+    container_name: traffic_app1
     depends_on: [kafka, postgres]
-    volumes: [./:/app]
-    ports: ["8001:8000"]
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./:/app
+    expose:
+      - "8000"
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC=traffic_updates
 
-  # --- Consumer Services ---
+  app2:
+    build: .
+    container_name: traffic_app2
+    depends_on: [kafka, postgres]
+    volumes:
+      - ./:/app
+    expose:
+      - "8000"
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC=traffic_updates
+
+  nginx:
+    image: nginx:latest
+    container_name: traffic_gateway_lb
+    ports:
+      - "8001:80"
+    depends_on:
+      - app1
+      - app2
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+  # --- Consumer Services with Gunicorn ---
   consumer-sut:
     build: .
     container_name: consumer_sut
     depends_on: [kafka]
     volumes: [./:/app]
-    ports: ["5001:5001"]
+    ports: 
+      - "5001:5001" # UI
+      - "9101:9101" # Metrics
     command: ["python", "consumer_sut.py"]
 
   consumer-recalc:
@@ -54,7 +94,9 @@ services:
     container_name: consumer_recalc
     depends_on: [kafka, postgres]
     volumes: [./:/app]
-    ports: ["5002:5002"]
+    ports: 
+      - "5002:5002" # UI
+      - "9102:9102" # Metrics
     command: ["python", "consumer_recalc.py"]
 
   consumer-sliding-window:
@@ -62,15 +104,43 @@ services:
     container_name: consumer_sliding_window
     depends_on: [kafka]
     volumes: [./:/app]
-    ports: ["5003:5003"]
+    ports: 
+      - "5003:5003" # UI
+      - "9103:9103" # Metrics
     command: ["python", "consumer_sliding_window.py"]
+
+  # --- Monitoring Services ---
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: prometheus
+    ports: ["9090:9090"]
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml"]
+    command: --config.file=/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:9.5.3
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    restart: always
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    container_name: kafka-exporter
+    ports: ["9308:9308"]
+    command: --kafka.server=kafka:29092 --web.listen-address=:9308
 
   # --- UI Service ---
   ui:
     image: nginx:1.21-alpine
     container_name: traffic_ui
     ports: ["8080:80"]
-    volumes: [./ui:/usr/share/nginx/html]
+    volumes: ["./ui:/usr/share/nginx/html"]
     depends_on: [consumer-sut, consumer-recalc, consumer-sliding-window]
 
 volumes:

@@ -1,15 +1,15 @@
+# requirements.txt
 fastapi
 uvicorn
 kafka-python
-psycopg2-binary
-protobuf
+aiokafka
 networkx
 osmnx
-pandas
-matplotlib
-seaborn
-apscheduler
+psycopg2-binary
+APScheduler
 requests
 Flask
 gunicorn
 Flask-CORS
+prometheus-client
+psutil

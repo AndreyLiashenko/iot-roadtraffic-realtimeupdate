@@ -1,83 +1,94 @@
 import json
-import networkx as nx
-from kafka import KafkaConsumer, errors
-import threading
 import time
+import threading
+from kafka import KafkaConsumer, errors
 from flask import Flask, jsonify
 from flask_cors import CORS
+from prometheus_client import Summary, start_http_server
+from csr_graph import CSRGraph
+from edge_mapper import EdgeMapper
+import networkx as nx
 
 # --- Settings ---
-KAFKA_TOPIC = 'traffic_updates'
-KAFKA_BOOTSTRAP_SERVERS = 'kafka:29092'
+SERVICE_NAME = "sut-consumer"
+KAFKA_TOPIC = "traffic_updates"
+KAFKA_BOOTSTRAP_SERVERS = "kafka:29092"
 GRAPH_FILE = "irpin_drive_graph.graphml"
-ALPHA = 0.3
-API_PORT = 5001 # Unique port
+UI_API_PORT = 5001
+METRICS_PORT = 9101
+ALPHA = 0.7
 
-# --- Global graph state ---
-live_graph = nx.read_graphml(GRAPH_FILE)
-graph_lock = threading.Lock()
-for u, v, data in live_graph.edges(data=True):
-    data['current_speed'] = 50.0
+# --- Prometheus Metrics ---
+PROCESSING_TIME = Summary(
+    "message_processing_seconds",
+    "Time spent processing a message",
+    ["consumer_name"]
+)
 
-# --- Reusable Kafka Connection Function ---
-def connect_to_kafka_with_retry():
-    """Tries to connect to Kafka with several retries."""
-    max_retries = 10
-    retry_delay = 5  # seconds
+# --- Graph + Mapper Initialization ---
+print(f"[{SERVICE_NAME}] Initializing graph...")
+mapper = EdgeMapper(GRAPH_FILE)
+csr_graph = CSRGraph(mapper)
+print(f"✅ [{SERVICE_NAME}] Graph loaded with {len(mapper.edge_id_map)} edges.")
 
-    for attempt in range(max_retries):
+# --- Flask UI ---
+app = Flask(__name__)
+CORS(app)
+app.config["GRAPH"] = csr_graph
+
+@app.route("/graph")
+def get_graph_data():
+    graph = app.config["GRAPH"]
+    return jsonify(graph.get_graph_data())
+
+# --- Kafka Logic ---
+def connect_to_kafka_with_retry(group_id):
+    """Tries to connect to Kafka with multiple retries."""
+    for attempt in range(10):
         try:
-            print(f"SUT Consumer: Attempting to connect to Kafka (Attempt {attempt + 1}/{max_retries})...")
+            print(f"[{SERVICE_NAME}] Connecting to Kafka (attempt {attempt + 1}/10)...")
             consumer = KafkaConsumer(
                 KAFKA_TOPIC,
                 bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                auto_offset_reset='earliest',
-                group_id='sut-consumer-group',
-                key_deserializer=lambda k: k.decode('utf-8'),
-                value_deserializer=lambda v: json.loads(v.decode('utf-8'))
+                auto_offset_reset="earliest",
+                group_id=group_id,
+                key_deserializer=lambda k: k.decode("utf-8"),
+                value_deserializer=lambda v: json.loads(v.decode("utf-8")),
             )
-            print("✅ SUT Consumer: Kafka Consumer connected.")
+            print(f"✅ [{SERVICE_NAME}] Kafka connected.")
             return consumer
         except errors.NoBrokersAvailable:
-            print(f"❌ SUT Consumer: No brokers available.")
-        except Exception as e:
-            print(f"❌ SUT Consumer: An unexpected error occurred: {e}")
-        
-        print(f"SUT Consumer: Retrying in {retry_delay} seconds...")
-        time.sleep(retry_delay)
-    
-    print("❌ SUT Consumer: Failed to connect to Kafka after several retries. Exiting.")
+            print(f"❌ [{SERVICE_NAME}] Kafka unavailable, retrying in 5s...")
+            time.sleep(5)
     return None
 
-# --- Flask App for UI ---
-app = Flask(__name__)
-CORS(app)
+@PROCESSING_TIME.labels(consumer_name="sut").time()
+def process_sut_message(message):
+    """Processes a single Kafka message (Exponential Smoothing)."""
+    try:
+        data = message.value
+        edge_id = message.key  # key = unique edge_id
+        current_speed = csr_graph.get_speed(edge_id)
+        updated_speed = (ALPHA * data["speed"]) + (1 - ALPHA) * current_speed
+        csr_graph.update_speed(edge_id, updated_speed)
+    except Exception as e:
+        print(f"⚠️ Error processing message: {e}")
 
-@app.route('/graph')
-def get_graph_data():
-    with graph_lock:
-        nodes_data = [{'id': node, 'lat': data['y'], 'lon': data['x']} for node, data in live_graph.nodes(data=True)]
-        edges_data = [{'source': u, 'target': v, 'speed': data.get('current_speed', 50.0)} for u, v, data in live_graph.edges(data=True)]
-    return jsonify({'nodes': nodes_data, 'edges': edges_data})
-
-# --- Kafka Consumer Logic ---
-def run_sut_consumer():
-    consumer = connect_to_kafka_with_retry()
+def run_consumer():
+    consumer = connect_to_kafka_with_retry("sut-consumer-group")
     if not consumer:
-        return # Exit if connection failed
+        print(f"❌ [{SERVICE_NAME}] Failed to start consumer.")
+        return
 
-    print("🚀 SUT Consumer is now processing messages...")
-    for message in consumer:
-        data, u, v = message.value, *eval(message.key)
-        with graph_lock:
-            try:
-                current_speed = live_graph.edges[u, v, 0]['current_speed']
-                updated_speed = (ALPHA * data['speed']) + (1 - ALPHA) * current_speed
-                live_graph.edges[u, v, 0]['current_speed'] = updated_speed
-            except KeyError:
-                pass
+    print(f"🚀 [{SERVICE_NAME}] Consuming messages...")
+    for msg in consumer:
+        process_sut_message(msg)
 
+# --- Entry Point ---
 if __name__ == "__main__":
-    api_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=API_PORT), daemon=True)
-    api_thread.start()
-    run_sut_consumer()
+    print(f"📊 [{SERVICE_NAME}] Starting Prometheus metrics server on port {METRICS_PORT}...")
+    start_http_server(port=METRICS_PORT, addr="0.0.0.0")
+
+    print(f"🚀 [{SERVICE_NAME}] Starting consumer and Flask UI...")
+    threading.Thread(target=run_consumer, daemon=True).start()
+    app.run(host="0.0.0.0", port=UI_API_PORT)
