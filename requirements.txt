@@ -13,3 +13,7 @@ gunicorn
 Flask-CORS
 prometheus-client
 psutil
+river
+scikit-learn
+ujson
+python-dateutil

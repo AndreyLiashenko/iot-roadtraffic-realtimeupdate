@@ -109,6 +109,29 @@ services:
       - "9103:9103" # Metrics
     command: ["python", "consumer_sliding_window.py"]
 
+  rules-builder:
+    build: .
+    container_name: rules_builder
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SOURCE_TOPIC: traffic_updates
+      RULES_TOPIC: alpha_rules
+      N_CLUSTERS: 6
+      BUILD_EVERY_N_EVENTS: 200000
+      BUILD_EVERY_SECONDS: 300
+      ELBOW_BUFFER_SIZE: 20000
+      ELBOW_K_MAX: 10
+      ELBOW_MIN_POINTS: 2000
+      ELBOW_COOLDOWN_SECONDS: 600
+      RULES_JSON_PATH: /app/alpha_rules.json
+      ALPHA_MIN: 0.3
+      ALPHA_MAX: 0.9
+    volumes:
+      - ./:/app
+    command: ["python", "consumer_rules_builder_elbow.py"]
+    networks:
+      - iot-roadtraffic-realtimeupdate_default
+
   # --- Monitoring Services ---
   prometheus:
     image: prom/prometheus:v2.45.0
