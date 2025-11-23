@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Traffic Brain Monitor</title>
+    <meta charset="utf-8" />
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    
+    <style>
+        body { 
+            font-family: 'Inter', sans-serif; margin: 0; padding: 0; 
+            background: #0f172a; color: #e2e8f0; 
+            height: 100vh; display: flex; flex-direction: column;
+        }
+
+        /* Header */
+        header {
+            padding: 15px 30px; background: #1e293b; border-bottom: 1px solid #334155;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        h1 { margin: 0; font-size: 20px; color: #f8fafc; letter-spacing: -0.5px; }
+        .status { font-size: 12px; color: #4ade80; font-weight: bold; display: flex; align-items: center; gap: 8px;}
+        .dot { width: 8px; height: 8px; background: #4ade80; border-radius: 50%; box-shadow: 0 0 10px #4ade80; }
+
+        /* Main Grid Layout */
+        .dashboard {
+            display: grid;
+            grid-template-columns: 3fr 2fr; /* Chart takes 60%, List 40% */
+            gap: 20px;
+            padding: 20px;
+            height: calc(100vh - 60px); /* Full height minus header */
+            box-sizing: border-box;
+        }
+
+        /* Chart Section */
+        .chart-panel {
+            background: #1e293b; border-radius: 16px; border: 1px solid #334155;
+            padding: 20px;
+            display: flex; flex-direction: column;
+        }
+        .chart-container { flex-grow: 1; width: 100%; position: relative; }
+
+        /* Rules List Section */
+        .rules-panel {
+            background: #1e293b; border-radius: 16px; border: 1px solid #334155;
+            display: flex; flex-direction: column;
+            overflow: hidden; /* Prevent panel from growing */
+        }
+        .rules-header {
+            padding: 20px; border-bottom: 1px solid #334155; font-weight: 800; 
+            text-transform: uppercase; font-size: 12px; color: #94a3b8;
+        }
+        .rules-list {
+            padding: 20px;
+            overflow-y: auto; /* Scroll ONLY this area */
+            flex-grow: 1;
+        }
+
+        /* Cards */
+        .cluster-card {
+            background: #0f172a; border-radius: 8px; padding: 15px; margin-bottom: 12px;
+            border-left: 4px solid #555; transition: 0.2s;
+        }
+        .cluster-card:hover { transform: translateX(5px); background: #1a2639; }
+        .card-top { display: flex; justify-content: space-between; margin-bottom: 10px; }
+        .card-title { font-size: 16px; font-weight: bold; color: #fff; }
+        .badge { font-size: 10px; padding: 4px 8px; border-radius: 12px; color: #000; font-weight: 800; text-transform: uppercase;}
+        
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 13px; color: #cbd5e1; }
+        .stat-val { font-weight: bold; color: #fff; }
+        .meta { margin-top: 10px; padding-top: 10px; border-top: 1px solid #334155; font-size: 11px; color: #64748b; display: flex; justify-content: space-between;}
+
+        /* D3 Styling */
+        .axis text { fill: #94a3b8; }
+        .axis path, .axis line { stroke: #334155; }
+        .grid line { stroke: #334155; stroke-dasharray: 4,4; opacity: 0.2; }
+
+        /* Scrollbars */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>🧠 Fuzzy AI Logic Monitor</h1>
+    <div class="status"><div class="dot"></div> CONNECTED: 5004</div>
+</header>
+
+<div class="dashboard">
+    <div class="chart-panel">
+        <h3 style="margin-top:0; color:#cbd5e1;">State Space (Load vs Speed)</h3>
+        <div id="chart" class="chart-container"></div>
+    </div>
+
+    <div class="rules-panel">
+        <div class="rules-header">Active Fuzzy Rules (Clusters)</div>
+        <div id="list" class="rules-list"></div>
+    </div>
+</div>
+
+<script>
+    const speedScale = d3.scaleLinear().domain([0, 10, 30, 50]).range(["#ef4444", "#f97316", "#eab308", "#22c55e"]);
+
+    function getStatus(speed) {
+        if(speed < 7) return "🛑 GRIDLOCK";
+        if(speed < 20) return "🐢 CONGESTION";
+        if(speed < 40) return "🚗 FLOWING";
+        return "🚀 FREE FLOW";
+    }
+
+    async function fetchData() {
+        try {
+            const res = await fetch('http://localhost:5004/clusters');
+            const data = await res.json();
+            renderDashboard(data);
+        } catch(e) { console.log("Waiting for connection..."); }
+    }
+
+    function renderDashboard(data) {
+        // CLEAN DATA: Force positives
+        const clusters = data.centers.map((c, i) => ({
+            id: i,
+            speed: Math.max(0, c[0]),
+            load: Math.max(0, c[1]),
+            w: data.weights[i],
+            sigma: data.sigmas[i][0],
+            alpha: data.alphas[i]
+        })).filter(c => c.w > 10).sort((a, b) => b.w - a.w);
+
+        renderChart(clusters);
+        renderList(clusters);
+    }
+
+    // --- D3 CHART ---
+    function renderChart(data) {
+        const container = d3.select("#chart");
+        container.html("");
+        const w = container.node().clientWidth - 50;
+        const h = container.node().clientHeight - 40;
+        
+        const svg = container.append("svg").attr("width", w + 50).attr("height", h + 40)
+            .append("g").attr("transform", "translate(40, 10)");
+
+        const maxLoad = d3.max(data, d => d.load) || 2.0;
+        const x = d3.scaleLinear().domain([0, maxLoad * 1.1]).range([0, w]);
+        const y = d3.scaleLinear().domain([0, 60]).range([h, 0]);
+
+        // Grid
+        svg.append("g").attr("class", "grid").call(d3.axisLeft(y).tickSize(-w).tickFormat(""));
+        svg.append("g").attr("class", "grid").attr("transform", `translate(0,${h})`).call(d3.axisBottom(x).tickSize(-h).tickFormat(""));
+
+        // Axes
+        svg.append("g").attr("transform", `translate(0,${h})`).call(d3.axisBottom(x));
+        svg.append("g").call(d3.axisLeft(y));
+
+        // Labels
+        svg.append("text").attr("x", w).attr("y", h - 10).attr("fill", "#cbd5e1").style("text-anchor", "end").text("LOAD FACTOR");
+        svg.append("text").attr("x", 10).attr("y", 10).attr("fill", "#cbd5e1").text("SPEED");
+
+        // Bubbles
+        svg.selectAll("circle.glow")
+            .data(data).enter().append("circle")
+            .attr("cx", d => x(d.load)).attr("cy", d => y(d.speed))
+            .attr("r", d => Math.min(60, Math.max(5, Math.abs(y(d.speed) - y(d.speed - d.sigma)))))
+            .attr("fill", d => speedScale(d.speed)).attr("opacity", 0.2);
+
+        svg.selectAll("circle.core")
+            .data(data).enter().append("circle")
+            .attr("cx", d => x(d.load)).attr("cy", d => y(d.speed))
+            .attr("r", d => Math.min(12, 4 + Math.log10(d.w)))
+            .attr("fill", d => speedScale(d.speed))
+            .attr("stroke", "#fff").attr("stroke-width", 2);
+    }
+
+    // --- LIST ---
+    function renderList(data) {
+        const list = document.getElementById("list");
+        list.innerHTML = "";
+        
+        data.forEach(c => {
+            const color = speedScale(c.speed);
+            const div = document.createElement("div");
+            div.className = "cluster-card";
+            div.style.borderLeftColor = color;
+            
+            div.innerHTML = `
+                <div class="card-top">
+                    <span class="card-title" style="color:${color}">Cluster #${c.id}</span>
+                    <span class="badge" style="background:${color}">${getStatus(c.speed)}</span>
+                </div>
+                <div class="stats-grid">
+                    <div>Speed: <span class="stat-val">${c.speed.toFixed(1)}</span> km/h</div>
+                    <div>Load: <span class="stat-val">${c.load.toFixed(2)}</span></div>
+                </div>
+                <div class="meta">
+                    <span>Adaptability (α): <strong>${c.alpha.toFixed(2)}</strong></span>
+                    <span>Hits: ${Math.round(c.w)}</span>
+                </div>
+            `;
+            list.appendChild(div);
+        });
+    }
+
+    setInterval(fetchData, 1000);
+    fetchData();
+</script>
+</body>
+</html>

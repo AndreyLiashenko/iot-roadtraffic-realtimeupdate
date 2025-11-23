@@ -17,3 +17,4 @@ scrape_configs:
         - 'consumer-sut:9101'
         - 'consumer-recalc:9102'
         - 'consumer-sliding-window:9103'
+        - 'consumer-sut-fuzzy:9104'

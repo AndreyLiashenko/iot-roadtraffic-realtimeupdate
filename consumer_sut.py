@@ -7,7 +7,6 @@ from flask_cors import CORS
 from prometheus_client import Summary, start_http_server
 from csr_graph import CSRGraph
 from edge_mapper import EdgeMapper
-import networkx as nx
 
 # --- Settings ---
 SERVICE_NAME = "sut-consumer"

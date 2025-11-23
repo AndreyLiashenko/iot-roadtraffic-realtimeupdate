@@ -1,114 +1,73 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Traffic Simulation Dashboard</title>
+    <title>Smart City Traffic Map</title>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
     <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
-        #map { height: 100vh; }
-        .controls { position: absolute; top: 10px; right: 10px; background: white; padding: 10px; border-radius: 5px; z-index: 1000; }
-        button { margin: 5px; padding: 10px; cursor: pointer; border: 1px solid #ccc; }
-        button.active { background-color: #4CAF50; color: white; }
-        #status { margin-top: 10px; font-style: italic; color: #555; }
+        body { margin: 0; padding: 0; font-family: 'Inter', sans-serif; background: #0f172a; }
+        #map { height: 100vh; width: 100vw; }
+        .controls { position: absolute; top: 20px; left: 20px; z-index: 1000; background: rgba(15, 23, 42, 0.9); padding: 15px; border-radius: 8px; color: white; width: 220px; }
+        button { width: 100%; padding: 10px; margin: 5px 0; background: #334155; border: none; color: white; cursor: pointer; border-radius: 4px; }
+        button.active { background: #2563eb; }
+        button.brain { background: linear-gradient(45deg, #ec4899, #8b5cf6); font-weight: bold; margin-top: 15px; }
     </style>
 </head>
 <body>
 
 <div class="controls">
-    <h3>Select Consumer</h3>
-    <button id="btn-5001" onclick="switchDataSource(5001, this)">SUT (Exponential Smoothing)</button>
-    <button id="btn-5002" onclick="switchDataSource(5002, this)">Baseline (DB Recalc)</button>
-    <button id="btn-5003" onclick="switchDataSource(5003, this)">Baseline (Sliding Window)</button>
-    <div id="status">Status: Idle</div>
+    <h3>Traffic Source</h3>
+    <button onclick="switchSource(5001, this)">Exponential Smoothing</button>
+    <button onclick="switchSource(5002, this)">DB Baseline</button>
+    <button onclick="switchSource(5003, this)">Sliding Window</button>
+    <button onclick="switchSource(5004, this)" class="active">Fuzzy AI</button>
+    
+    <button class="brain" onclick="window.open('http://localhost:5004/monitor', '_blank')">🧠 Open AI Monitor</button>
+    <button class="brain" onclick="window.open('http://localhost:5004/monitor3d', '_blank')">📐 Open 3D Universe</button>
 </div>
 
 <div id="map"></div>
 
 <script>
-    const map = L.map('map').setView([50.55, 30.22], 13); // Center on Irpin
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; OpenStreetMap &copy; CARTO'
-    }).addTo(map);
-
+    const map = L.map('map').setView([50.55, 30.22], 13);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { attribution: 'CARTO' }).addTo(map);
     L.svg().addTo(map);
-    const svg = d3.select(map.getPanes().overlayPane).select("svg").attr("pointer-events", "auto");
-    const g = svg.append("g").attr("class", "leaflet-zoom-hide");
+    const g = d3.select(map.getPanes().overlayPane).select("svg").append("g").attr("class", "leaflet-zoom-hide");
+    
+    let currentPort = 5004;
+    const colorScale = d3.scaleLinear().domain([0, 15, 40]).range(["#ef4444", "#eab308", "#22c55e"]);
 
-    let currentPort = 0;
-    let nodes = {}, edges = [];
-    let updateInterval;
+    function update() {
+        fetch(`http://localhost:${currentPort}/graph`).then(r => r.json()).then(data => {
+            const nodes = {}; data.nodes.forEach(n => nodes[n.id] = n);
+            const proj = (lat, lon) => map.latLngToLayerPoint([lat, lon]);
+            const line = d3.line().x(d => d.x).y(d => d.y);
 
-    const colorScale = d3.scaleLinear().domain([5, 25, 50]).range(["red", "yellow", "green"]);
-
-    function projectPoint(lat, lon) {
-        const point = map.latLngToLayerPoint(new L.LatLng(lat, lon));
-        return [point.x, point.y];
+            const paths = g.selectAll("path").data(data.edges, d => d.source+"-"+d.target);
+            paths.enter().append("path").merge(paths)
+                .attr("d", d => {
+                    const p1 = proj(nodes[d.source].lat, nodes[d.source].lon);
+                    const p2 = proj(nodes[d.target].lat, nodes[d.target].lon);
+                    return line([{x: p1.x, y: p1.y}, {x: p2.x, y: p2.y}]);
+                })
+                .attr("stroke", d => colorScale(Math.max(0, d.speed)))
+                .attr("stroke-width", 3).attr("fill", "none").attr("opacity", 0.8);
+            paths.exit().remove();
+        });
     }
 
-    async function fetchGraphData(port) {
-        try {
-            const response = await fetch(`http://localhost:${port}/graph`);
-            if (!response.ok) throw new Error('Network response was not ok');
-            const data = await response.json();
-            
-            data.nodes.forEach(n => nodes[n.id] = {lat: n.lat, lon: n.lon});
-            edges = data.edges;
-
-            document.getElementById('status').innerText = `Status: Updated at ${new Date().toLocaleTimeString()}`;
-            return true;
-        } catch (error) {
-            document.getElementById('status').innerText = `Status: Error fetching from port ${port}`;
-            return false;
-        }
-    }
-
-    function drawGraph() {
-        if (edges.length === 0) return;
-
-        const lineGenerator = d3.line().x(d => d[0]).y(d => d[1]);
-
-        const path = g.selectAll("path").data(edges, d => `${d.source}-${d.target}`);
-
-        path.enter().append("path")
-            .merge(path)
-            .attr("stroke-width", 2)
-            .attr("fill", "none")
-            .attr("d", d => {
-                const sourceNode = nodes[d.source];
-                const targetNode = nodes[d.target];
-                if (!sourceNode || !targetNode) return null;
-                return lineGenerator([projectPoint(sourceNode.lat, sourceNode.lon), projectPoint(targetNode.lat, targetNode.lon)]);
-            })
-            .attr("stroke", d => colorScale(d.speed));
-        
-        path.exit().remove();
-    }
-
-    function switchDataSource(port, btnElement) {
-        if (currentPort === port) return;
+    function switchSource(port, btn) {
         currentPort = port;
-        
-        document.querySelectorAll('.controls button').forEach(btn => btn.classList.remove('active'));
-        btnElement.classList.add('active');
-
-        nodes = {}; 
-        edges = [];
-        g.selectAll("path").remove();
-        
-        if (updateInterval) clearInterval(updateInterval);
-        
-        const update = () => fetchGraphData(port).then(success => success && drawGraph());
-        update();
-        updateInterval = setInterval(update, 3000);
+        document.querySelectorAll('button:not(.brain)').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
     }
 
-    map.on("zoom move", drawGraph);
-    document.getElementById('btn-5001').click(); // Start with the first consumer
+    map.on("zoomend", update);
+    setInterval(update, 1000);
+    update(); // Init
 </script>
-
 </body>
 </html>

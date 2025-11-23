@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>3D Traffic Brain</title>
+    <meta charset="utf-8" />
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    
+    <style>
+        body { 
+            font-family: 'Inter', sans-serif; margin: 0; padding: 0; 
+            background: #0b0e14; color: #e2e8f0; 
+            height: 100vh; display: flex; flex-direction: column;
+            overflow: hidden;
+        }
+
+        header {
+            padding: 15px 25px; background: #151921; border-bottom: 1px solid #2d3748;
+            display: flex; justify-content: space-between; align-items: center; height: 50px;
+        }
+        h1 { margin: 0; font-size: 18px; letter-spacing: 1px; color: #a0aec0; text-transform: uppercase; }
+        .status { font-size: 12px; color: #48bb78; font-weight: bold; }
+
+        .main-container {
+            display: flex; flex: 1; height: calc(100vh - 65px);
+        }
+
+        /* 3D Chart Area */
+        .chart-wrapper {
+            flex: 1; /* Takes ~70-75% */
+            position: relative;
+            background: #000; /* Pure black for contrast */
+        }
+        #myDiv { width: 100%; height: 100%; }
+
+        /* Sidebar List */
+        .sidebar {
+            width: 350px; background: #151921; 
+            border-left: 1px solid #2d3748;
+            display: flex; flex-direction: column;
+            z-index: 10; box-shadow: -5px 0 20px rgba(0,0,0,0.5);
+        }
+        .sidebar-header {
+            padding: 15px; border-bottom: 1px solid #2d3748;
+            font-size: 12px; color: #718096; font-weight: 800; text-transform: uppercase;
+        }
+        .list-container {
+            flex: 1; overflow-y: auto; padding: 15px;
+        }
+
+        /* Cards */
+        .card {
+            background: #1a202c; border-radius: 8px; padding: 12px; margin-bottom: 10px;
+            border-left: 4px solid #718096; cursor: pointer;
+            transition: all 0.2s ease; border: 1px solid transparent;
+        }
+        .card:hover { transform: translateX(-4px); background: #2d3748; border-color: #4a5568; }
+        .card.active { background: #2d3748; border-color: #fff; box-shadow: 0 0 15px rgba(255,255,255,0.1); }
+
+        .card-title { display: flex; justify-content: space-between; font-weight: bold; font-size: 14px; margin-bottom: 5px; }
+        .card-badge { font-size: 9px; padding: 2px 6px; border-radius: 4px; color: #000; font-weight: 800; text-transform: uppercase; }
+        
+        .card-row { display: flex; justify-content: space-between; font-size: 12px; color: #cbd5e1; margin-bottom: 3px; }
+        .dim { color: #718096; }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #151921; }
+        ::-webkit-scrollbar-thumb { background: #4a5568; border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>📐 3D Cluster Visualization</h1>
+    <div class="status">● LIVE: 5004</div>
+</header>
+
+<div class="main-container">
+    <div class="chart-wrapper">
+        <div id="myDiv"></div>
+    </div>
+    <div class="sidebar">
+        <div class="sidebar-header">Active Fuzzy Rules</div>
+        <div id="list" class="list-container"></div>
+    </div>
+</div>
+
+<script>
+    // --- CONFIG ---
+    const API_URL = 'http://localhost:5004/clusters';
+    let globalData = [];
+    let isHovering = false;
+
+    // Color Gradient for Speed (0=Red -> 50=Green)
+    function getColor(speed) {
+        if(speed < 10) return '#ef4444'; // Red
+        if(speed < 25) return '#eab308'; // Yellow
+        return '#22c55e'; // Green
+    }
+
+    function getStatus(speed) {
+        if(speed < 7) return "GRIDLOCK";
+        if(speed < 20) return "CONGESTION";
+        if(speed < 35) return "FLOWING";
+        return "FREE";
+    }
+
+    // --- PLOTLY SETUP ---
+    const layout = {
+        margin: {l:0, r:0, b:0, t:0},
+        paper_bgcolor: '#0b0e14',
+        plot_bgcolor: '#0b0e14',
+        scene: {
+            // Axis settings
+            xaxis: { title: 'LOAD', backgroundcolor: '#000', gridcolor: '#333', showbackground: true, zerolinecolor: '#666' },
+            yaxis: { title: 'DENSITY', backgroundcolor: '#000', gridcolor: '#333', showbackground: true, zerolinecolor: '#666' },
+            zaxis: { title: 'SPEED', backgroundcolor: '#111', gridcolor: '#444', showbackground: true, zerolinecolor: '#fff' },
+            camera: { eye: {x: 1.5, y: 1.5, z: 0.8} } // Initial view angle
+        },
+        showlegend: false
+    };
+
+    // Init empty plot
+    Plotly.newPlot('myDiv', [], layout, {displayModeBar: false, responsive: true});
+
+    // --- DATA FETCH LOOP ---
+    async function update() {
+        if (isHovering) return; // Don't update while user is interacting to prevent jitter
+
+        try {
+            const res = await fetch(API_URL);
+            const raw = await res.json();
+
+            // Process Data
+            globalData = raw.centers.map((c, i) => ({
+                id: i,
+                speed: Math.max(0, c[0]),   // Z
+                load: Math.max(0, c[1]),    // X
+                density: Math.max(0, c[2]), // Y
+                w: raw.weights[i],
+                alpha: raw.alphas[i]
+            })).filter(c => c.w > 10).sort((a, b) => b.w - a.w);
+
+            render3D();
+            renderList();
+
+        } catch(e) { console.error("Fetch error:", e); }
+    }
+
+    // --- RENDER 3D CHART ---
+    function render3D() {
+        const x = globalData.map(d => d.load);
+        const y = globalData.map(d => d.density);
+        const z = globalData.map(d => d.speed);
+        
+        // Size based on weight (log scale)
+        const sizes = globalData.map(d => Math.max(5, 3 + Math.log(d.w)*2));
+        const colors = globalData.map(d => getColor(d.speed));
+        const texts = globalData.map(d => `Cluster #${d.id}<br>Speed: ${d.speed.toFixed(1)}<br>Load: ${d.load.toFixed(2)}<br>Dens: ${d.density.toFixed(1)}`);
+
+        const trace = {
+            x: x, y: y, z: z,
+            mode: 'markers',
+            marker: {
+                size: sizes,
+                color: colors,
+                opacity: 0.8,
+                line: {color: '#fff', width: 1}
+            },
+            type: 'scatter3d',
+            text: texts,
+            hoverinfo: 'text'
+        };
+
+        Plotly.react('myDiv', [trace], layout);
+    }
+
+    // --- RENDER SIDEBAR LIST ---
+    function renderList() {
+        const list = document.getElementById('list');
+        // Keep scroll position if possible, or simple rebuild
+        // Ideally we should diff, but rebuild is safer for simplicity
+        if (!isHovering) list.innerHTML = ''; 
+        if (isHovering) return; // Don't rebuild list while hovering
+
+        globalData.forEach(c => {
+            const color = getColor(c.speed);
+            const div = document.createElement('div');
+            div.className = 'card';
+            div.style.borderLeftColor = color;
+            div.id = `card-${c.id}`; // Hook for interaction
+
+            div.innerHTML = `
+                <div class="card-title">
+                    <span style="color:${color}">Cluster #${c.id}</span>
+                    <span class="card-badge" style="background:${color}">${getStatus(c.speed)}</span>
+                </div>
+                <div class="card-row">
+                    <span>🏎️ ${c.speed.toFixed(1)} km/h</span>
+                    <span class="dim">Load: ${c.load.toFixed(2)}</span>
+                </div>
+                <div class="card-row">
+                    <span>⚖️ Density: ${c.density.toFixed(0)}</span>
+                    <span class="dim">w: ${(c.w/1000).toFixed(1)}k</span>
+                </div>
+            `;
+
+            // INTERACTION LOGIC
+            div.addEventListener('mouseenter', () => highlightCluster(c.id));
+            div.addEventListener('mouseleave', resetHighlight);
+            
+            list.appendChild(div);
+        });
+    }
+
+    // --- HIGHLIGHT LOGIC ---
+    function highlightCluster(targetId) {
+        isHovering = true;
+        
+        // Update UI Cards
+        document.querySelectorAll('.card').forEach(el => el.style.opacity = '0.3');
+        document.getElementById(`card-${targetId}`).style.opacity = '1';
+        document.getElementById(`card-${targetId}`).classList.add('active');
+
+        // Update 3D Plot
+        const colors = globalData.map(d => d.id === targetId ? '#ffffff' : getColor(d.speed)); // Highlight white
+        const opacities = globalData.map(d => d.id === targetId ? 1.0 : 0.1); // Dim others
+        const sizes = globalData.map(d => d.id === targetId ? 30 : 5); // Make HUGE
+
+        Plotly.restyle('myDiv', {
+            'marker.color': [colors],
+            'marker.opacity': [opacities],
+            'marker.size': [sizes]
+        });
+    }
+
+    function resetHighlight() {
+        isHovering = false;
+        document.querySelectorAll('.card').forEach(el => {
+            el.style.opacity = '1';
+            el.classList.remove('active');
+        });
+        render3D(); // Restore original state
+    }
+
+    setInterval(update, 1000);
+    update();
+</script>
+</body>
+</html>
