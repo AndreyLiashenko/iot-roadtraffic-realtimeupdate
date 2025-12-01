@@ -2,7 +2,7 @@ import json
 import asyncio
 import time
 from collections import defaultdict, deque
-from typing import Tuple, Union, Deque
+from typing import Tuple, Union, Deque, Dict
 
 from fastapi import FastAPI, HTTPException
 from aiokafka import AIOKafkaProducer
@@ -17,35 +17,49 @@ KAFKA_TOPIC = "traffic_updates"
 GRAPH_FILE = "irpin_drive_graph.graphml"
 RECONNECT_DELAY = 5
 MAX_RETRIES = 10
-WINDOW_SECONDS = 60
+WINDOW_SECONDS = 30 # Зменшив до 30, щоб реакція була швидшою
 
 # --- Global state ---
 app = FastAPI(title="Traffic Real-time Update API Gateway (Async)")
 mapper = EdgeMapper(GRAPH_FILE)
 producer: AIOKafkaProducer | None = None
 
-# --- Sliding window storage for Data Density ---
-class DensityStore:
+class TrafficStateStore:
     def __init__(self, window_seconds: int = WINDOW_SECONDS):
         self.window = window_seconds
-        self._events: dict[int, Deque[float]] = defaultdict(deque)
+        self._history: dict[int, Deque[Tuple[float, float]]] = defaultdict(deque)
         self._lock = asyncio.Lock()
 
-    async def update_and_get(self, edge_id: int, ts: float) -> int:
+    async def process_update(self, edge_id: int, ts: float, current_speed: float) -> Tuple[int, float]:
         threshold = ts - self.window
+        
         async with self._lock:
-            dq = self._events[edge_id]
-            while dq and dq[0] < threshold:
+            dq = self._history[edge_id]
+            
+            while dq and dq[0][0] < threshold:
                 dq.popleft()
-            dq.append(ts)
-            return len(dq)
+            
+            # 2. Додаємо нові дані
+            dq.append((ts, current_speed))
+            
+            # 3. Рахуємо щільність даних (кількість пакетів за вікно)
+            density = len(dq)
+            
+            if dq:
+                start_speed = dq[0][1] # Швидкість 30 сек тому
+                delta_speed = current_speed - start_speed
+            else:
+                delta_speed = 0.0
 
-density_store = DensityStore()
+            return density, delta_speed
+
+state_store = TrafficStateStore()
 
 # --- Models ---
 class TrafficData(BaseModel):
     edge: Tuple[Union[int, str], Union[int, str]]
     speed: float = Field(..., ge=0)
+    speed_limit: float = Field(..., ge=1)
     car_count: int = Field(..., ge=0)
     capacity: int = Field(..., ge=1)
     load_factor: float = Field(..., ge=0)
@@ -104,15 +118,21 @@ async def update_traffic_data(data: TrafficData):
         u, v = data.edge
         edge_id = mapper.get_edge_id(u, v)
 
-        density = await density_store.update_and_get(edge_id, data.timestamp)
+        density, delta_speed = await state_store.process_update(edge_id, data.timestamp, data.speed)
+        
+        speed_efficiency = data.speed / data.speed_limit
+        
+        traffic_trend = delta_speed / data.speed_limit
 
         message = {
             "edge_id": edge_id,
-            "speed": data.speed,
             "timestamp": data.timestamp,
-            "car_count": data.car_count,
-            "capacity": data.capacity,
+            "speed": data.speed,
+            "speed_limit": data.speed_limit,
             "load_factor": data.load_factor,
+            "speed_efficiency": speed_efficiency,
+            "traffic_trend": traffic_trend,
+            "car_count": data.car_count,
             "data_density_60s": density,
         }
 
@@ -122,11 +142,19 @@ async def update_traffic_data(data: TrafficData):
             value=message,
         )
 
-        print(
-            f"📤 edge={edge_id} speed={data.speed:.1f} cc={data.car_count} "
-            f"cap={data.capacity} lf={data.load_factor:.3f} dens60={density}"
-        )
-        return {"status": "ok", "edge_id": edge_id, "data_density_60s": density}
+        if int(data.timestamp * 10) % 50 == 0: # Рідше логуємо
+            print(
+                f"📤 edge={edge_id} "
+                f"Eff={speed_efficiency:.2f} "
+                f"Load={data.load_factor:.2f} "
+                f"Trend={traffic_trend:.3f}" # Тепер тут будуть числа типу -0.2, +0.1
+            )
+            
+        return {
+            "status": "ok", 
+            "edge_id": edge_id, 
+            "vector": [speed_efficiency, data.load_factor, traffic_trend]
+        }
 
     except Exception as e:
         print(f"❌ Kafka send error: {e}")
@@ -139,7 +167,7 @@ async def health_check():
 
 @app.get("/")
 async def index():
-    return {"message": "Traffic API Gateway (async) is running!"}
+    return {"message": "Traffic API Gateway (Smart) is running!"}
 
 if __name__ == "__main__":
     import uvicorn
